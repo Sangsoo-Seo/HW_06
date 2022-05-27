@@ -1,0 +1,273 @@
+---
+title: "Homework06"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    theme: yeti
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=FALSE}
+install.packages('tidyverse', repos = "http://cran.us.r-project.org")
+#install.packages('tidymodels', repos = "http://cran.us.r-project.org")
+install.packages('ggplot2', repos = "http://cran.us.r-project.org")
+install.packages('visdat', repos = "http://cran.us.r-project.org")
+install.packages("corrplot", repos = "http://cran.us.r-project.org")
+install.packages("discrim", repos = "http://cran.us.r-project.org")
+install.packages("rlang", repos = "http://cran.us.r-project.org")
+install.packages('janitor', repos = "http://cran.us.r-project.org")
+install.packages('rpart.plot', repos = "http://cran.us.r-project.org")
+install.packages('ranger', repos = "http://cran.us.r-project.org")
+install.packages('vip', repos = "http://cran.us.r-project.org")
+install.packages('xgboost', repos = "http://cran.us.r-project.org")
+library(tidymodels)
+library(ggplot2)
+library(visdat)
+library(corrplot)
+library(discrim)
+library(klaR)
+library(yardstick)
+library(janitor)
+library(rpart.plot)
+library(ranger)
+library(vip)
+library(xgboost)
+```
+
+```{r}
+set.seed(231)
+pokemon = read.csv('data/Pokemon.csv')
+```
+
+## Exercise 1
+
+```{r}
+pokemon <- pokemon %>% clean_names()
+
+pokemon = pokemon[pokemon$type_1 == 'Bug' | pokemon$type_1 == 'Fire' | pokemon$type_1 == 'Grass' | pokemon$type_1 == 'Normal' | pokemon$type_1 == 'Water' | pokemon$type_1 == 'Psychic', ]
+
+pokemon$type_1 = as.factor(pokemon$type_1)
+pokemon$legendary = as.factor(pokemon$legendary)
+pokemon$generation = as.factor(pokemon$generation)
+```
+
+```{r}
+pokemon_split = initial_split(pokemon, prop = 0.70, strata = type_1)
+
+pokemon_train = training(pokemon_split)
+pokemon_test = testing(pokemon_split)
+```
+
+```{r}
+pokemon_folds <- vfold_cv(pokemon_train, v = 5, strata = type_1)
+```
+
+```{r}
+pokemon_recipe = recipe(type_1 ~ legendary + generation + 
+                                sp_atk + attack + speed + 
+                                defense + hp + sp_def, 
+                        data = pokemon_train) %>%
+  step_dummy(legendary) %>%
+  step_dummy(generation) %>%
+  step_normalize(all_predictors())
+```
+
+
+## Exercise 2
+
+```{r}
+M = cor(select_if(pokemon_train, is.numeric))
+corrplot(M, method = 'color', col = COL2(n=20), cl.length = 21, order = 'AOE',
+         addCoef.col = 'grey')
+```
+'total' variable has a positive relationship with other variables. 
+
+
+## Exercise 3
+
+```{r, message=FALSE}
+tree_spec = decision_tree(cost_complexity = tune()) %>%
+        set_engine('rpart') %>%
+        set_mode('classification')
+
+tree_wf = workflow() %>%
+        add_model(tree_spec) %>%
+        add_recipe(pokemon_recipe)
+
+tree_grid <- grid_regular(cost_complexity(range = c(-3, -1)), levels = 10)
+
+tree_tune <- tune_grid(
+        tree_wf, 
+        resamples = pokemon_folds, 
+        grid = tree_grid, 
+        metrics = metric_set(roc_auc))
+
+autoplot(tree_tune)
+```
+As complexity getting bigger, roc_auc getting higher. However, roc_auc goes down when complexity is close to 0.1. 
+
+
+## Exercise 4
+
+```{r}
+tree_tune %>% collect_metrics() %>% arrange(desc(mean))
+```
+0.62 is the highest roc_auc.
+
+
+## Exercise 5
+
+```{r}
+tree_best = tree_tune %>% select_best(metric = 'roc_auc')
+tree_final = tree_wf %>% finalize_workflow(tree_best)
+tree_final_fit = tree_final %>% fit(pokemon_train)
+
+rpart.plot(extract_fit_engine(tree_final_fit), roundint=FALSE)
+```
+
+
+## Exercise 6
+
+```{r}
+rf_spec = rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+        set_engine('ranger', importance = 'impurity') %>%
+        set_mode('classification')
+```
+
+'mtry' represents the number of selected variables which we give to each tree to make decision. 
+$\\$
+'tree' represents the number of total trees. 
+$\\$
+'min_n' represents the minimum number of data points in each node to split a brunch. 
+
+```{r}
+rf_wf = workflow() %>%
+        add_recipe(pokemon_recipe) %>%
+        add_model(rf_spec)
+```
+
+```{r}
+rf_grid = grid_regular(mtry(range = c(1,8)),
+                       trees(range = c(1,10)),
+                       min_n(range = c(1,10)),
+                       levels = 8)
+```
+
+There are 8 predictors in the dataset. So, select more than 8 variables could not work. 
+
+
+## Exercise 7
+
+```{r, , message=FALSE}
+rf_tune = tune_grid(
+        rf_wf,
+        resamples = pokemon_folds,
+        grid = rf_grid,
+        metrics = metric_set(roc_auc))
+
+autoplot(rf_tune)
+```
+```{r}
+rf_best = rf_tune %>% select_best(metric = 'roc_auc')
+rf_best
+```
+Usually, the minimal node size give a effect to roc_auc. When the size is 4 and 6, the lines are located on the high parts. 
+
+
+
+## Exercise 8
+
+```{r}
+rf_tune %>% collect_metrics() %>% arrange(desc(mean))
+```
+
+
+## Exercise 9
+
+```{r}
+rf_final = rf_wf %>% finalize_workflow(rf_best)
+rf_final_fit = rf_final %>% fit(data = pokemon_train)
+
+rf_final_fit %>% extract_fit_engine() %>% vip()
+```
+'sp_atk' is the most important variable. Other variables also seem important except 'generation' variables.
+
+
+
+## Exercise 10
+
+```{r}
+xg_spec = boost_tree(trees = tune()) %>%
+        set_engine('xgboost') %>%
+        set_mode('classification')
+
+xg_wf = workflow() %>%
+        add_recipe(pokemon_recipe) %>%
+        add_model(xg_spec)
+
+xg_grid = grid_regular(trees(range = c(10, 2000)),
+                       levels = 10)
+
+xg_tune = tune_grid(
+        xg_wf,
+        resamples = pokemon_folds,
+        grid = xg_grid,
+        metrics = metric_set(roc_auc))
+
+autoplot(xg_tune)
+```
+It was getting good at small tree numbers, but after 500, it is getting worse. 
+
+
+```{r}
+xg_tune %>% collect_metrics() %>% arrange(desc(mean))
+```
+
+
+## Exercise 11
+
+```{r}
+xg_best = xg_tune %>% select_best(metric = 'roc_auc')
+xg_best
+```
+
+```{r}
+score = bind_rows(tree_best, rf_best, xg_best)
+score = score %>% add_column('model' = c('Decision Tree', 'Random Forest',
+                                             'Boosted Tree'),
+                                 'roc_auc' = c(0.65, 0.69, 0.69))
+score = score[, c('model', 'roc_auc')]
+
+score
+```
+
+```{r}
+final = xg_wf %>% finalize_workflow(xg_best)
+final_fit = final %>% fit(data = pokemon_test)
+
+augment(final_fit, new_data = pokemon_test) %>%
+        roc_auc(truth = type_1, estimate = c(.pred_Bug, .pred_Fire, .pred_Grass,
+                                             .pred_Normal, .pred_Water, .pred_Psychic))
+```
+
+```{r}
+augment(final_fit, new_data = pokemon_test) %>%
+        roc_curve(truth = type_1, estimate = c(.pred_Bug, .pred_Fire, .pred_Grass,
+                                             .pred_Normal, .pred_Water, .pred_Psychic)) %>% autoplot()
+```
+
+```{r}
+augment(final_fit, new_data = pokemon_test) %>%
+        conf_mat(truth = type_1, estimate = .pred_class) %>% 
+                         autoplot(type = "heatmap")
+```
+
+Boosted tree is the best model and pure tree is the worst. I don't understand why a few types could not work on the model. The results of decision tree and roc_curve are pretty bad.
+
